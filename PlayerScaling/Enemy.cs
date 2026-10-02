@@ -26,7 +26,7 @@ namespace PlayerScaling
 
             float tier3VanillaCount = Mathf.FloorToInt(Mathf.Max(1, Mathf.Min(2, (effectiveLevelsCompleted + 4) / 5f)));
 
-            float vanillaMapSize = Mathf.Min(10, 5 + effectiveLevelsCompleted);
+            float vanillaMapSize = Plugin.VanillaMapSize(RunManager.instance.levelsCompleted);
 
             float tier1Density = tier1VanillaCount / vanillaMapSize;
             float tier2Density = tier2VanillaCount / vanillaMapSize;

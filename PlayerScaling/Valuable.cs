@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection.Emit;
 using System.Reflection;
 using System.Text;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 using static HarmonyLib.AccessTools;
 
@@ -15,6 +16,15 @@ namespace PlayerScaling
     [HarmonyWrapSafe]
     public static class ValuablePatch
     {
+        private sealed class CurveBaseline
+        {
+            public AnimationCurve Curve { get; }
+
+            public CurveBaseline(AnimationCurve curve) => Curve = curve;
+        }
+
+        private static readonly ConditionalWeakTable<AnimationCurve, CurveBaseline> CurveBaselines = new();
+
         private static AnimationCurve[] TotalMaxAmountCurves { get; set; }
         private static AnimationCurve[] TotalMaxValueCurves { get; set; }
         private static AnimationCurve[] TinyCurves { get; set; }
@@ -32,13 +42,8 @@ namespace PlayerScaling
             Plugin.Logger.LogInfo("Player scaling runs HERE");
             var difficultyDelegates = GetStaticNumberedMethodDelegates<Plugin.DifficultyDelegate>(typeof(SemiFunc), "RunGetDifficultyMultiplier", [], 10);
             
-            int vanillaMapSize = Mathf.Min(10, 5 + RunManager.instance.levelsCompleted);
-            if (RunManager.instance.levelsCompleted >= 10)
-                vanillaMapSize += Mathf.Min(RunManager.instance.levelsCompleted - 9, 5);
-
             //Similar to enemies, we try to maintain density, but I'm not fucking around with trying to replicate these curves.
-            float mapScalingFactor = Plugin.curModuleAmount / (float)vanillaMapSize;
-            mapScalingFactor *= Plugin.valuableScalingMultiplier.Value;
+            float mapScalingFactor = GetMapDensityScalingFactor();
 
             var maxAmountFieldRefs = GetNumberedFieldRefs<ValuableDirector, AnimationCurve>(__instance, "totalMaxAmountCurve", 10);
             if(maxAmountFieldRefs.Count != 0) {
@@ -117,23 +122,50 @@ namespace PlayerScaling
 #endif
         
         private static AnimationCurve ReplaceCurve(ref AnimationCurve target, AnimationCurve source, Func<float, float> calculate) {
-            // the compiler will warn of unintended reference comparison; it is completely intended
             Plugin.Logger.LogInfo("Player scaling will replace a curve with a factor of " + calculate(1f));
-            if (target == source) return target;
-            
+
+            if (source == null)
+            {
+                target = null;
+                return null;
+            }
+
+            // If SetupHost sees our previous output again, start from its saved input.
+            // A curve from another mod (including SLRUpgradePack) is treated as fresh
+            // input, so its change is preserved and this mod's multiplier is applied once.
+            AnimationCurve baselineSource = source;
+            if (CurveBaselines.TryGetValue(source, out var priorBaseline))
+                baselineSource = priorBaseline.Curve;
+
+            var baseline = new AnimationCurve();
+            baseline.CopyFrom(baselineSource);
+
             target = new AnimationCurve();
-            
-            Plugin.Logger.LogInfo("Player scaling will copy a curve for scaling");
-            target.CopyFrom(source); // duplicate curve parameters
-            target.ClearKeys(); // but replace with the scaled keyframes
-            
-            foreach (var key in source.GetKeys()) 
+            target.CopyFrom(baseline); // preserve wrap modes and curve metadata
+            target.ClearKeys(); // replace keyframes with the scaled values
+
+            foreach (var key in baseline.keys)
             {
                 var newKey = key with { value = calculate.Invoke(key.value)};
                 target.AddKey(newKey);
             }
 
+            CurveBaselines.Add(target, new CurveBaseline(baseline));
+
             return target;
+        }
+
+        internal static float GetMapDensityScalingFactor()
+        {
+            int vanillaMapSize = Plugin.VanillaMapSize(RunManager.instance.levelsCompleted);
+            float mapDensityFactor = 1f;
+            if (Plugin.mapScalingEnabled.Value && vanillaMapSize > 0)
+                mapDensityFactor = Plugin.curModuleAmount / (float)vanillaMapSize;
+
+            float valuableFactor = Plugin.valuableScalingEnabled.Value
+                ? Plugin.valuableScalingMultiplier.Value
+                : 1f;
+            return mapDensityFactor * valuableFactor;
         }
         
         private static List<FieldRef<S, T>> GetNumberedFieldRefs<S, T>(S source, string expectedBaseName, int checkMax, int checkMin = 0) 
@@ -171,6 +203,60 @@ namespace PlayerScaling
             }
         
             return methods;
+        }
+    }
+
+    // The game uses an inclusive loop bound for cosmetic spawn checks, so scale the
+    // number of checks here rather than changing either of its probability curves.
+    [HarmonyPatch(typeof(ValuableDirector), nameof(ValuableDirector.SetupHost), MethodType.Enumerator)]
+    public static class CosmeticWorldObjectRollScalingPatch
+    {
+        private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var codes = new List<CodeInstruction>(instructions);
+            var originalCodes = new List<CodeInstruction>(codes);
+            var clampedLoopsGetter = AccessTools.Method(
+                typeof(ValuableDirector), nameof(ValuableDirector.CosmeticWorldObjectLevelLoopsClampedGet));
+            var scaledLoopsGetter = AccessTools.Method(
+                typeof(CosmeticWorldObjectRollScalingPatch), nameof(ScaleRollLoopBound));
+
+            if (clampedLoopsGetter == null || scaledLoopsGetter == null)
+            {
+                Plugin.Logger.LogError("Cannot resolve the cosmetic roll loop bound methods; preserving vanilla SetupHost iterator");
+                return originalCodes;
+            }
+
+            var matchingCalls = new List<int>();
+            for (var i = 0; i < codes.Count; i++)
+            {
+                if (codes[i].Calls(clampedLoopsGetter))
+                    matchingCalls.Add(i);
+            }
+
+            if (matchingCalls.Count != 1)
+            {
+                Plugin.Logger.LogError("Cannot uniquely locate the cosmetic roll loop bound; preserving vanilla SetupHost iterator");
+                return originalCodes;
+            }
+
+            var call = codes[matchingCalls[0]];
+            call.opcode = OpCodes.Call;
+            call.operand = scaledLoopsGetter;
+            Plugin.Logger.LogInfo("Installed cosmetic world-object roll-count scaling in ValuableDirector.SetupHost");
+            return codes;
+        }
+
+        private static int ScaleRollLoopBound(ValuableDirector director)
+        {
+            // REPO loops from zero through this bound (inclusive), hence the +1/-1.
+            int vanillaLoopBound = director.CosmeticWorldObjectLevelLoopsClampedGet();
+            int vanillaRollCount = vanillaLoopBound + 1;
+            float scalingFactor = ValuablePatch.GetMapDensityScalingFactor();
+            int scaledRollCount = Mathf.Clamp(Mathf.RoundToInt(vanillaRollCount * scalingFactor), 0, 2000);
+            Plugin.Logger.LogInfo(
+                $"Cosmetic world-object rolls: vanillaBound={vanillaLoopBound}, vanillaRolls={vanillaRollCount}, " +
+                $"densityFactor={scalingFactor:F3}, scaledRolls={scaledRollCount}, scaledBound={scaledRollCount - 1}");
+            return scaledRollCount - 1;
         }
     }
 }

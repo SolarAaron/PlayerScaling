@@ -20,23 +20,38 @@ namespace PlayerScaling
     {
         static void Prefix(LevelGenerator __instance, ref int ___ModuleAmount, ref int ___ExtractionAmount, ref float ___DebugLevelSize)
         {
+            Plugin.Logger.LogInfo("Entered LevelGenerator.TileGeneration map scaling prefix");
+            int requestedModuleAmount = ___ModuleAmount;
+            if (requestedModuleAmount <= 4)
+            {
+                // Vanilla preserves small/custom level module counts and skips its
+                // normal progression logic for them. Keep that behavior intact.
+                Plugin.curModuleAmount = requestedModuleAmount;
+                Plugin.Logger.LogInfo(
+                    $"Preserving small/custom map: requestedModules={requestedModuleAmount}; " +
+                    "skipping map scaling to match vanilla TileGeneration");
+                return;
+            }
+
             float playerScalingAmount = Plugin.PlayerScaling(ScalingType.Map);
+            int vanillaMapSize = Plugin.VanillaMapSize(RunManager.instance.levelsCompleted);
+            int maxMapSize = Mathf.Min(Mathf.CeilToInt(Plugin.defaultMaxMapSize.Value * playerScalingAmount), 2000); //Capped at 2000 for sanity sake
 
             ___ExtractionAmount = 0;
-            if (___ModuleAmount > 4)
+            if (maxMapSize > 200) // ignored in beta
             {
-                int maxMapSize = Mathf.Min(Mathf.CeilToInt(Plugin.defaultMaxMapSize.Value * playerScalingAmount),2000); //Capped at 2000 for sanity sake
-                if (maxMapSize > 200) // ignored in beta
-                {
-                    __instance.LevelHeight = 50;
-                    __instance.LevelWidth = 50;
-                }
-                // no change needed here
-                ___ModuleAmount = Mathf.Min((int)(playerScalingAmount * (5 + RunManager.instance.levelsCompleted)), maxMapSize);
-                Plugin.curModuleAmount = ___ModuleAmount;
-                ___DebugLevelSize = playerScalingAmount; // in beta level height and level width get overwritten by a constant, multiplied by this value
-                ___ExtractionAmount = (___ModuleAmount - 4) / 2;
+                __instance.LevelHeight = 50;
+                __instance.LevelWidth = 50;
             }
+
+            ___ModuleAmount = Mathf.Min(Mathf.CeilToInt(playerScalingAmount * vanillaMapSize), maxMapSize);
+            Plugin.curModuleAmount = ___ModuleAmount;
+            ___DebugLevelSize = playerScalingAmount; // in beta level height and level width get overwritten by a constant, multiplied by this value
+            ___ExtractionAmount = Mathf.Max(0, (___ModuleAmount - 4) / 2);
+            Plugin.Logger.LogInfo(
+                $"Map scaling applied: requestedModules={requestedModuleAmount}, scale={playerScalingAmount:F3}, " +
+                $"vanillaModules={vanillaMapSize}, " +
+                $"maxModules={maxMapSize}, modules={___ModuleAmount}, extractions={___ExtractionAmount}");
         }
 #if DEBUG
     static void Postfix(LevelGenerator __instance, ref int ___ModuleAmount, ref int ___ExtractionAmount, ref int ___DeadEndAmount, ref GameObject ___DebugModule)
@@ -59,6 +74,15 @@ namespace PlayerScaling
             var endIndex = -1;
 
             var codes = new List<CodeInstruction>(instructions);
+            var originalCodes = new List<CodeInstruction>(codes);
+            var moduleAmountField = typeof(LevelGenerator).GetField("ModuleAmount", BindingFlags.NonPublic | BindingFlags.Instance);
+            var extractionAmountField = typeof(LevelGenerator).GetField("ExtractionAmount", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            if (moduleAmountField == null || extractionAmountField == null)
+            {
+                Plugin.Logger.LogError("Cannot find LevelGenerator module/extraction fields; preserving vanilla iterator");
+                return originalCodes;
+            }
 
             //Remove the following snippet:
             /* ModuleAmount = Mathf.Min(5 + RunManager.instance.levelsCompleted, 10);
@@ -66,14 +90,14 @@ namespace PlayerScaling
 
             for (var i = 0; i < codes.Count; i++)
             {
-                if (codes[i].StoresField(typeof(LevelGenerator).GetField("ModuleAmount", BindingFlags.NonPublic | BindingFlags.Instance)))
+                if (codes[i].StoresField(moduleAmountField))
                 {
                     if (!found)
                     {
                         found = true;
-                        for (int j = i; j > 0; j--)
+                        for (int j = i; j >= 0; j--)
                         {
-                            if (codes[j].opcode == OpCodes.Ble)
+                            if (codes[j].opcode == OpCodes.Ble || codes[j].opcode == OpCodes.Ble_S)
                             {
                                 startIndex = j + 1;
                                 break;
@@ -82,20 +106,21 @@ namespace PlayerScaling
                     }
                     else
                     {
-                        if (codes[i - 1].opcode == OpCodes.Add) continue;
+                        if (i > 0 && codes[i - 1].opcode == OpCodes.Add) continue;
                         endIndex = i + 1;
                         break;
                     }
                 }
             }
 
-            if (startIndex > -1 && endIndex > -1)
+            if (startIndex >= 0 && endIndex > startIndex)
             {
                 codes.RemoveRange(startIndex, endIndex - startIndex);
             }
             else
             {
-                Plugin.Logger.LogError("Cannot find <Stdfld ModuleAmount> in LevelGenerator.TileGeneration");
+                Plugin.Logger.LogError("Cannot find <Stdfld ModuleAmount> in LevelGenerator.TileGeneration; preserving vanilla iterator");
+                return originalCodes;
             }
             startIndex = -1;
             endIndex = -1;
@@ -104,9 +129,9 @@ namespace PlayerScaling
 
             for (var i = 0; i < codes.Count; i++)
             {
-                if (codes[i].StoresField(typeof(LevelGenerator).GetField("ExtractionAmount", BindingFlags.NonPublic | BindingFlags.Instance)))
+                if (codes[i].StoresField(extractionAmountField))
                 {
-                    if (codes[i - 1].opcode == OpCodes.Ldc_I4_0)
+                    if (i > 0 && codes[i - 1].opcode == OpCodes.Ldc_I4_0)
                     {
                         startIndex = i - 2;
                         endIndex = i + 1;
@@ -116,13 +141,14 @@ namespace PlayerScaling
                 }
             }
 
-            if (startIndex > -1 && endIndex > -1)
+            if (startIndex >= 0 && endIndex > startIndex)
             {
                 codes.RemoveRange(startIndex, endIndex - startIndex);
             }
             else
             {
-                Plugin.Logger.LogError("Cannot find <Stdfld ExtractionAmount> in LevelGenerator.TileGeneration");
+                Plugin.Logger.LogError("Cannot find <Stdfld ExtractionAmount> in LevelGenerator.TileGeneration; preserving vanilla iterator");
+                return originalCodes;
             }
 
             found = false;
@@ -149,9 +175,9 @@ namespace PlayerScaling
 
             for (var i = 0; i < codes.Count; i++)
             {
-                if (codes[i].LoadsField(typeof(LevelGenerator).GetField("ModuleAmount", BindingFlags.NonPublic | BindingFlags.Instance)) && !found)
+                if (codes[i].LoadsField(moduleAmountField) && !found)
                 {
-                    if (codes[i + 1].opcode == OpCodes.Ldc_I4_S && (Convert.ToInt32(codes[i + 1].operand) == 10 || Convert.ToInt32(codes[i + 1].operand) == 15) && codes[i + 2].opcode == OpCodes.Blt)
+                    if (i > 0 && i + 2 < codes.Count && codes[i + 1].opcode == OpCodes.Ldc_I4_S && (Convert.ToInt32(codes[i + 1].operand) == 10 || Convert.ToInt32(codes[i + 1].operand) == 15) && (codes[i + 2].opcode == OpCodes.Blt || codes[i + 2].opcode == OpCodes.Blt_S))
                     {
                         found = true;
                         startIndex = i - 1;
@@ -159,9 +185,9 @@ namespace PlayerScaling
                     continue;
                 }
 
-                if (found && codes[i].StoresField(typeof(LevelGenerator).GetField("ExtractionAmount", BindingFlags.NonPublic | BindingFlags.Instance)))
+                if (found && codes[i].StoresField(extractionAmountField))
                 {
-                    if (codes[i - 1].opcode == OpCodes.Ldc_I4_0)
+                    if (i > 0 && codes[i - 1].opcode == OpCodes.Ldc_I4_0)
                     {
                         endIndex = i + 1;
                         break;
@@ -170,15 +196,17 @@ namespace PlayerScaling
                 }
             }
 
-            if (startIndex > -1 && endIndex > -1)
+            if (startIndex >= 0 && endIndex > startIndex)
             {
                 codes.RemoveRange(startIndex, endIndex - startIndex);
             }
             else
             {
-                Plugin.Logger.LogError("Cannot find <Stdfld ExtractionAmount> in LevelGenerator.TileGeneration");
+                Plugin.Logger.LogError("Cannot find vanilla extraction thresholds in LevelGenerator.TileGeneration; preserving vanilla iterator");
+                return originalCodes;
             }
 
+            Plugin.Logger.LogInfo("Installed LevelGenerator.TileGeneration iterator rewrite");
             return codes.AsEnumerable();
         }
     }

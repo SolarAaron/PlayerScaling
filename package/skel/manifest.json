@@ -1,0 +1,9 @@
+{
+    "name": "PlayerScalingUpdated",
+    "version_number": "2.0.0",
+    "website_url": "https://github.com/SolarAaron/PlayerScaling",
+    "description": "Map scales with number of players and config options, optional scaling past level 11",
+    "dependencies": [
+        "BepInEx-BepInExPack-5.4.2100"
+    ]
+}
