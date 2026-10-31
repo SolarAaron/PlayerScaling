@@ -364,3 +364,6 @@ FodyWeavers.xsd
 
 .idea/
 Directory.Repo.props
+
+/package/skel/plugins/
+/package/*.zip

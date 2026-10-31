@@ -10,14 +10,14 @@
         <GameAssemblyDir Condition="'$(GameAssemblyDir)' == ''">$(GameDirectory)/REPO_Data/Managed</GameAssemblyDir>
         <BepInExDirectory Condition="'$(BepInExDirectory)' == ''">$(GameDirectory)/BepInEx</BepInExDirectory>
         <BepInExCoreDir Condition="'$(BepInExCoreDir)' == ''">$(BepInExDirectory)/core</BepInExCoreDir>
-        <AssemblyVersion>1.2.4</AssemblyVersion>
+        <AssemblyVersion>2.0.1</AssemblyVersion>
     </PropertyGroup>
 
     <PropertyGroup>
         <TargetFramework>netstandard2.1</TargetFramework>
         <AssemblyName>PlayerScaling</AssemblyName>
         <Product>Player Scaling</Product>
-        <Version>1.2.4</Version>
+        <Version>2.0.1</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <RestoreAdditionalProjectSources>

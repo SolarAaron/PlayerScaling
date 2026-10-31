@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.1] - 2026-10-29
+
+### Fixed
+- Updated the required BepInExPack dependency to 5.4.2305 for Unity 6 compatibility.
+
 ## [2.0.0] - 2026-10-1
 
 ### Fixed
